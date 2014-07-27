@@ -1,3 +1,46 @@
+--------------------------------------------------------------------------------
+-- Make `require '.foo'` load 'foo.lua' relative to this script
+local SCRIPT_DIR = (rawget(_G, 'arg')
+    and arg[0] 
+    and arg[0]:gsub('[/\\]?[^/\\]+$', '') 
+    or '.')
+
+local function relative_loader(modulename)
+  print(SCRIPT_DIR, arg[0])
+  local resolved_path, num_matches = string.gsub(
+      modulename, "^%.(.*)$",
+      function(tail)
+        return string.format("%s/%s.lua", SCRIPT_DIR, tail)
+      end
+  )
+  if num_matches == 1 then
+    local mod, error_message = loadfile(resolved_path)
+    return error_message and error_message or mod
+  end
+end
+
+table.insert(package.loaders, relative_loader)
+--------------------------------------------------------------------------------
+require "./strict"
+
+local FFIUtil = require "./ffi_util"
+local Matrix = require "./matrix"
+local Vector = require "./vector"
+local Sort = require "./sort"
+local ffi = require "ffi"
+
+local function printf(...)
+  print(string.format(...))
+end
+
+local DEBUG = arg[1] or false
+local function NOOP() end
+
+local dprintf = NOOP
+if DEBUG then dprintf = printf end
+
+local DEBUG_BOUNDS_CHECKING = false
+
 -- local mt = getmetatable(_G)
 -- if mt == nil then
 --   mt = {}
@@ -29,272 +72,13 @@
 --    for _, v in ipairs{...} do mt.__declared[v] = true end
 -- end
 -- ---
-local ffi = require "ffi"
 -------------------------------------------------------------------------------
-local DEBUG = arg[1] == "DEBUG"
-local DEBUG_BOUNDS_CHECKING = false
--------------------------------------------------------------------------------
-ffi.cdef[[
-  void* calloc(size_t, size_t);
-  void free(void*);
-]]
--------------------------------------------------------------------------------
--- Converts the given ctype to an opaque identifier that can be used as a table
--- key.
-local function ctypeid(ctype)
-  return tonumber(ffi.typeof(ctype))
-end
--------------------------------------------------------------------------------
--- Returns, for the given ctype `T`, the ctype `T*`.
-local pointer_type = (function()
-  -- Cache the derived pointer type; calculating it aborts a LuaJIT trace;
-  -- obviously we want to minimise this.
-  local typeid_to_pointer_type = {}
-  return function(ctype)
-    local type_id = ctypeid(ctype)
-    local derived_type = typeid_to_pointer_type[type_id]
-    if derived_type == nil then
-      derived_type = ffi.typeof("$*", ctype)
-      typeid_to_pointer_type[type_id] = derived_type
-    end
-    return derived_type
-  end
-end)()
--------------------------------------------------------------------------------
--- Allocates a struct; tries hard not to abort a LuaJIT trace, unlike
--- `ffi.new()`.
--- Args:
---   struct_type (ctype): the ctype to allocate
---   size (number, optional): if given, allocate |size| bytes instead of
---     sizeof(|struct_type|). Useful for variable-length structs.
-local function allocate_struct(struct_type, size)
-  size = size or ffi.sizeof(struct_type)
-  local ptr_t = pointer_type(struct_type)
-  local struct_ptr = ffi.cast(ptr_t, ffi.C.calloc(1, size))
-  return ffi.gc(struct_ptr[0], ffi.C.free)
-end
+
 
 -------------------------------------------------------------------------------
 
-local qsort = (function()
-  local function swap(data, a, b)
-    data[a], data[b] = data[b], data[a]
-  end
-
-  local function median_of_three(data, begin, end_, context, is_less)
-    local length = end_ - begin
-    assert(length ~= 0)
-    local mid = begin + length/2
-    local last = end_ - 1
-
-    if not is_less(data[begin], data[mid], context) then
-      swap(data, begin, mid)
-    end
-
-    if not is_less(data[mid], data[last], context) then
-      swap(data, mid, last)
-    end
-
-    return mid
-  end
-
-  local function partition(data, begin, end_, context, is_less)
-    local pivot_idx = median_of_three(data, begin, end_, context, is_less)
-    local pivot_value = data[pivot_idx]
-    local right_idx = end_ - 1
-    swap(data, pivot_idx, right_idx)
-
-    local new_pivot_idx = begin
-    for i = begin, right_idx - 1 do
-      if not is_less(data[i], pivot_value, context) then
-        swap(data, i, new_pivot_idx)
-        new_pivot_idx = new_pivot_idx + 1
-      end
-    end
-    swap(data, right_idx, new_pivot_idx)
-  end
-
-  local function qsort(data, begin, end_, context, is_less)
-    if end_ - begin == 0 then return end
-    local new_pivot = partition(data, begin, pivot, end_, context, is_less)
-    qsort(data, begin, new_pivot, context, is_less)
-    qsort(data, new_pivot+1, end_, context, is_less)
-  end
-
-  return qsort
-end)()
 
 -------------------------------------------------------------------------------
-
-local function NOOP() end
-
-local dprintf = NOOP
-if DEBUG then 
-  dprintf = function(...)
-    print(string.format(...))
-  end
-end
-
-local Vector = (function()
-  local cdecl_string = [[ struct {
-    static const int ELEM_SIZE = $;
-    int capacity;
-    int length;
-    $ data[0];
-  }]]
-
-  local ctype_by_value_typeid = {}
-
-  local check_index = NOOP
-  if DEBUG_BOUNDS_CHECKING == true then
-    check_index = function (self, idx)
-      assert(0 <= idx and idx < self.capacity)
-    end
-  end
-
-  local metatable = {
-    __new = function(cls, capacity)
-      local size = ffi.sizeof(cls) + capacity * cls.ELEM_SIZE
-      local obj = allocate_struct(cls, size)
-      obj.capacity = capacity
-      return obj
-    end,
-
-    __len = function(self)
-      return self.length
-    end,
-
-    __index = function(self, idx)
-      check_index(self, idx)
-      return self.data[idx]
-    end,
-
-    __newindex = function(self, idx, val)
-      check_index(self, idx)
-      self.data[idx] = val
-    end,
-
-    __tostring = function(self)
-      local line = {}
-      for i = 0, self.capacity - 1 do
-        table.insert(line, string.format("%8.3f", self[i]))
-      end
-      return table.concat(line)
-    end,
-  }
-
-  local module = setmetatable({
-    clear = function(self)
-      ffi.fill(self.data, self.ELEM_SIZE * self.capacity)
-    end,
-    fill = function(self, val)
-      for i=0, #self-1 do
-        self.data[i] = val
-      end
-    end,
-  },
-  {
-    __call = function(cls, value_type)
-      local type_id = ctypeid(value_type)
-      local ctype = ctype_by_value_typeid[type_id]
-      if ctype == nil then
-        ctype = ffi.typeof(cdecl_string, ffi.sizeof(value_type),
-          ffi.typeof(value_type))
-        ctype = ffi.metatype(ctype, metatable)
-        ctype_by_value_typeid[type_id] = ctype
-      end
-      return ctype
-    end,
-  })
-
-  return module
-end)()
-
--------------------------------------------------------------------------------
--- Construct a Matrix ctype using the given value type.
--- Args:
---   value_type (ctype): the value type to use for the Matrix
-local Matrix
-Matrix = (function()
-  local cdecl_string = [[ struct {
-    static const int ELEM_SIZE = $;
-    int m, n, capacity;
-    $ data[0];
-  }]]
-
-  local ctype_by_value_typeid = {}
-
-  local check_index = NOOP
-  if DEBUG_BOUNDS_CHECKING == true then
-    check_index = function(self, i, j)
-      assert(0 <= i and i < self.m)
-      assert(0 <= j and j < self.n)
-    end
-  end
-
-  local metatable = {
-    __new = function(cls, m, n)
-      local size = m * n * cls.ELEM_SIZE + ffi.sizeof(cls)
-      local matrix = allocate_struct(cls, size)
-      matrix.capacity, matrix.m, matrix.n = m * n, m, n
-      return matrix
-    end,
-
-    __tostring = function(self)
-      local lines = {}
-      for i = 0, self.m - 1 do
-        local line = {}
-        for j = 0, self.n - 1 do
-          table.insert(line, string.format("%8.3f", self(i, j)))
-        end
-        table.insert(lines, table.concat(line))
-      end
-      return table.concat(lines, "\n")
-    end,
-
-    __call = function(self, i, j)
-        check_index(self, i, j)
-        return self.data[i * self.n + j]
-    end,
-
-    __index = {
-      get = function(self, i, j)
-        check_index(self, i, j)
-        return self.data[i * self.n + j]
-      end,
-
-      set = function(self, i, j, v)
-        check_index(self, i, j)
-        self.data[i * self.n + j] = v
-      end,
-
-      clear = function(self)
-        ffi.fill(self.data, self.capacity * self.ELEM_SIZE)
-      end,
-
-      reshape = function(self, m, n)
-        assert(self.capacity >= m * n)
-        self.m, self.n = m, n
-      end,
-    },
-  }
-
-  local module = setmetatable({}, {
-    __call = function(cls, value_type)
-      local type_id = ctypeid(value_type)
-      local ctype = ctype_by_value_typeid[type_id]
-
-      if ctype == nil then
-        ctype = ffi.typeof(cdecl_string, ffi.sizeof(value_type), value_type)
-        ffi.metatype(ctype, metatable)
-        ctype_by_value_typeid[type_id] = ctype
-      end
-      return ctype
-    end,
-  })
-
-  return module
-end)()
 --------------------------------------------------------------------------------
 -- -- Returns the byte at index `idx` of the string `str`. NB: Indexes start at
 -- -- zero! `str` must be a Lua string or a cdata array/pointer.
