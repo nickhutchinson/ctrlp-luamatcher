@@ -206,6 +206,8 @@ local MatchSession = {
             coefficients[i] = 0.75
           elseif last_kind == CharType.Dot then
             coefficients[i] = 0.7
+          else
+            coefficients[i] = 0.0
           end
         end
       end
