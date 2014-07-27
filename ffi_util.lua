@@ -1,8 +1,5 @@
 local ffi = require "ffi"
 
-local DEBUG = arg[1] == "DEBUG"
-local DEBUG_BOUNDS_CHECKING = false
--------------------------------------------------------------------------------
 ffi.cdef[[
   void* calloc(size_t, size_t);
   void free(void*);

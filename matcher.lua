@@ -1,8 +1,8 @@
 --------------------------------------------------------------------------------
 -- Make `require '.foo'` load 'foo.lua' relative to this script
 local SCRIPT_DIR = (rawget(_G, 'arg')
-    and arg[0] 
-    and arg[0]:gsub('[/\\]?[^/\\]+$', '') 
+    and arg[0]
+    and arg[0]:gsub('[/\\]?[^/\\]+$', '')
     or '.')
 
 local function relative_loader(modulename)
@@ -40,74 +40,10 @@ local dprintf = NOOP
 if DEBUG then dprintf = printf end
 
 local DEBUG_BOUNDS_CHECKING = false
-
--- local mt = getmetatable(_G)
--- if mt == nil then
---   mt = {}
---   setmetatable(_G, mt)
--- end
---
--- __STRICT = true
--- mt.__declared = {}
---
--- mt.__newindex = function (t, n, v)
---   if __STRICT and not mt.__declared[n] then
---     local w = debug.getinfo(2, "S").what
---     if w ~= "main" and w ~= "C" then
---       error("assign to undeclared variable '"..n.."'", 2)
---     end
---     mt.__declared[n] = true
---   end
---   rawset(t, n, v)
--- end
---   
--- mt.__index = function (t, n)
---   if not mt.__declared[n] and debug.getinfo(2, "S").what ~= "C" then
---     error("variable '"..n.."' is not declared", 2)
---   end
---   return rawget(t, n)
--- end
---
--- function global(...)
---    for _, v in ipairs{...} do mt.__declared[v] = true end
--- end
--- ---
--------------------------------------------------------------------------------
-
-
--------------------------------------------------------------------------------
-
-
--------------------------------------------------------------------------------
---------------------------------------------------------------------------------
--- -- Returns the byte at index `idx` of the string `str`. NB: Indexes start at
--- -- zero! `str` must be a Lua string or a cdata array/pointer.
--- local function get_char(str, idx)
---   if type(str) == "cdata" then
---     return str[idx]
---   end
---   return string.byte(str, idx+1)
--- end
---------------------------------------------------------------------------------
--- Given a metatable, adds a __call() metamethod that acts as a constructor.
-local Class = (function()
-  local metatable = {
-    __call = function(cls, ...)
-      if cls.__new then
-        return cls:__new(...)
-      else
-        return setmetatable({}, cls)
-      end
-    end
-  }
-
-  return function(mt)
-    return setmetatable(mt, metatable)
-  end
-end)()
 --------------------------------------------------------------------------------
 local value_type = ffi.typeof"double"
 
+-- Converts character `ch` to its ascii value.
 local function B(ch) return string.byte(ch, 1, 1) end
 
 local function is_upper(ch) return B'A' <= ch and ch <= B'Z' end
@@ -137,47 +73,119 @@ local is_same_letter = (function()
   end
 end)()
 
-local MatchSession = Class({
+local MatchSession = {
   __index = {
-    -- Ensures the match vectors, as well as the scoreboard matrix are
-    -- allocated.
-    _reset_state = function(self, m, n)
-      if not self._match_offsets or self._match_offsets.capacity < n then
-        self._match_offsets = Vector(value_type)(n)
-      end
-      self._match_offsets.length = n
+    -- #get_match_score()#
+    -- Calculates the score if |needle| is to match the candidate string
+    -- |haystack|.
+    --
+    -- Args:
+    --   haystack {string}: The haystack.
+    --   needle   {string}: The needle.
+    --
+    -- Returns:
+    --   A {number} between 0.0 and 1.0.
+    --   0.0 is returned when |needle| is not a subseqeuence of |haystack|;
+    --   returns 1.0 if |needle| is the empty string.
+    get_match_score = function(self, haystack, needle)
+      dprintf("haystack: %s, needle: %s", haystack, needle)
+      self:_prepare_for_match(haystack, needle)
 
-      if not self._match_offsets_prev 
-          or self._match_offsets_prev.capacity < n then
-        self._match_offsets_prev = Vector(value_type)(n)
-      end
-      self._match_offsets_prev.length = n
+      local m, n = #needle + 1, #haystack + 1
+      local normalized_char_score = (1.0 / (m-1) + 1.0 / (n-1)) / 2
 
-      if not self._scoreboard or self._scoreboard.capacity < m * n then
-        self._scoreboard = Matrix(value_type)(m, n)
+      local scoreboard = self._scoreboard
+      local match_coefficients = self._match_coefficients
+      local match_offsets, match_offsets_prev =
+          self._match_offsets, self._match_offsets_prev
+
+      local j_start = 0
+
+      for i = 1, scoreboard.m - 1 do
+        for j = j_start + 1, scoreboard.n - 1 do
+          local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
+
+          if not is_same_letter(ch_i, ch_j) then
+            match_offsets[j] = match_offsets[j-1]
+            scoreboard:set(i, j, math.max(scoreboard(i, j-1),
+                                          scoreboard(i-1, j)))
+          else
+            j_start = math.min(j_start, j)
+
+            local coefficient = match_coefficients[j]
+            if coefficient == 0 then
+              local distance = j - match_offsets_prev[j-1]
+              assert(distance > 0)
+              coefficient = 0.75 / distance
+            end
+
+            local cumulative_score = (scoreboard(i-1, j-1) +
+                normalized_char_score * coefficient)
+            scoreboard:set(i, j, cumulative_score)
+
+            if cumulative_score >= scoreboard(i, match_offsets[j-1]) then
+              match_offsets[j] = j
+            else
+              match_offsets[j] = match_offsets[j-1]
+            end
+          end
+        end
+
+        local row_had_match = (0 ~= match_offsets[scoreboard.n - 1])
+        if not row_had_match then return 0.0 end
+
+        match_offsets_prev, match_offsets = match_offsets, match_offsets_prev
+        match_offsets[j_start] = 0
+      end
+
+      return scoreboard(scoreboard.m-1, scoreboard.n-1)
+    end,
+
+    -- #_prepare_for_match()#
+    -- Resets the internal state before a run; ensures the match vectors, as
+    -- well as the scoreboard matrix are allocated.
+    -- Args:
+    --   haystack {string}:
+    --   needle {string}:
+    _prepare_for_match = function(self, haystack, needle)
+      local m, n = #needle + 1, #haystack + 1
+      self:_reset_vector('_match_offsets', n)
+      self:_reset_vector('_match_offsets_prev', n)
+      self:_reset_matrix('_scoreboard', m, n)
+      self:_reset_vector('_match_coefficients', n)
+      self:_calculate_match_coefficients(haystack)
+    end,
+
+    _reset_matrix = function(self, name, m, n)
+      local mat = self[name]
+      if not mat or mat.capacity < m * n then
+        mat = Matrix(value_type)(m, n)
+        self[name] = mat
       else
-        self._scoreboard:reshape(m, n)
+        mat:reshape(m, n)
       end
     end,
 
+    _reset_vector = function(self, name, n)
+      local vec = self[name]
+      if not vec or vec.capacity < n then
+        vec = Vector(value_type)(n)
+        self[name] = vec
+      end
+      vec.length = n
+    end,
+
+    -- #_calculate_match_coefficients()#
     -- Initialises the _match_coefficients array.
-    -- Params:
-    --   haystack: the haystack vector
-    --
+    -- Args:
+    --   haystack {Vector}: the haystack vector
     _calculate_match_coefficients = (function()
       local CharType = {
         Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0,
       }
       return function(self, haystack)
         local n = #haystack + 1
-
-        if not self._match_coefficients
-            or self._match_coefficients.capacity < n then
-          self._match_coefficients = Vector(value_type)(n)
-        end
         local coefficients = self._match_coefficients
-        coefficients.length = n
-
         local kind = CharType.PathSep
         for i = 1, n - 1 do
           local ch = string.byte(haystack, i)
@@ -202,71 +210,12 @@ local MatchSession = Class({
         end
       end
     end)(),
-
-    get_match_score = function(self, haystack, needle)
-      dprintf("haystack: %s, needle: %s", haystack, needle)
-      local m, n = #needle + 1, #haystack + 1
-      local NORMALIZED_CHAR_SCORE = (1.0 / (m-1) + 1.0 / (n-1)) / 2
-
-      self:_reset_state(m, n)
-      self:_calculate_match_coefficients(haystack)
-
-      local scoreboard = self._scoreboard
-      local match_coefficients = self._match_coefficients
-
-      local match_offsets, match_offsets_prev = 
-          self._match_offsets, self._match_offsets_prev
-
-      local j_start = 0
-
-      for i = 1, scoreboard.m - 1 do
-        for j = j_start + 1, scoreboard.n - 1 do
-          local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
-
-          if not is_same_letter(ch_i, ch_j) then
-            match_offsets[j] = match_offsets[j-1]
-            scoreboard:set(i, j, math.max(scoreboard(i, j-1),
-                                          scoreboard(i-1, j)))
-            goto continue
-          end
-
-          j_start = math.min(j_start, j)
-
-          local coefficient = match_coefficients[j]
-          if coefficient == 0 then
-            local distance = j - match_offsets_prev[j-1]
-            assert(distance > 0)
-            coefficient = 0.75 / distance
-          end
-
-          local cumulative_score = scoreboard(i-1, j-1) + 
-              NORMALIZED_CHAR_SCORE * coefficient
-          scoreboard:set(i, j, cumulative_score)
-
-          if cumulative_score >= scoreboard(i, match_offsets[j-1]) then
-            match_offsets[j] = j
-          else
-            match_offsets[j] = match_offsets[j-1]
-          end
-
-          ::continue::
-        end
-
-        local row_had_match = (0 ~= match_offsets[scoreboard.n - 1])
-        if not row_had_match then return 0.0 end
-
-        match_offsets_prev, match_offsets = match_offsets, match_offsets_prev
-        match_offsets[j_start] = 0
-      end
-
-      return scoreboard(scoreboard.m-1, scoreboard.n-1)
-    end,
   },
 
   __tostring = function(self)
     return string.format("Matrix:\n\n%s", self._scoreboard)
   end,
-})
+}
 
 local TEST_CASES = {
   { "ab/cd/ef", "ace", },
@@ -282,7 +231,7 @@ local TEST_CASES = {
 }
 
 local function main()
-  local session = MatchSession()
+  local session = setmetatable({}, MatchSession)
   local r
 
   local upper = 1000000
