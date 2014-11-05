@@ -1,39 +1,16 @@
---------------------------------------------------------------------------------
--- Make `require '.foo'` load 'foo.lua' relative to this script
-local SCRIPT_DIR = (rawget(_G, 'arg')
-    and arg[0]
-    and arg[0]:gsub('[/\\]?[^/\\]+$', '')
-    or '.')
+require 'fuzzy_matcher.support.strict'
+local ffi = require 'ffi'
 
-local function relative_loader(modulename)
-  print(SCRIPT_DIR, arg[0])
-  local resolved_path, num_matches = string.gsub(
-      modulename, "^%.(.*)$",
-      function(tail)
-        return string.format("%s/%s.lua", SCRIPT_DIR, tail)
-      end
-  )
-  if num_matches == 1 then
-    local mod, error_message = loadfile(resolved_path)
-    return error_message and error_message or mod
-  end
-end
-
-table.insert(package.loaders, relative_loader)
---------------------------------------------------------------------------------
-require "./strict"
-
-local FFIUtil = require "./ffi_util"
-local Matrix = require "./matrix"
-local Vector = require "./vector"
-local Sort = require "./sort"
-local ffi = require "ffi"
+local FFIUtil = require 'fuzzy_matcher.support.ffi_util'
+local Matrix = require 'fuzzy_matcher.support.matrix'
+local Vector = require 'fuzzy_matcher.support.vector'
+local Sort = require 'fuzzy_matcher.support.sort'
 
 local function printf(...)
   print(string.format(...))
 end
 
-local DEBUG = arg[1] or false
+local DEBUG = false
 local function NOOP() end
 
 local dprintf = NOOP
@@ -41,7 +18,7 @@ if DEBUG then dprintf = printf end
 
 local DEBUG_BOUNDS_CHECKING = false
 --------------------------------------------------------------------------------
-local value_type = ffi.typeof"double"
+local value_type = ffi.typeof'double'
 
 -- Converts character `ch` to its ascii value.
 local function B(ch) return string.byte(ch, 1, 1) end
@@ -61,15 +38,15 @@ local is_same_letter = (function()
     if is_upper(ch) then return ch + B'a' - B'A' else return ch end
   end
 
-  local equiv_table = Vector("char")(256)
+  local equivalence_table = Vector('char')(256)
   for i = 0, 255 do
-    equiv_table[i] = to_lower(i)
+    equivalence_table[i] = to_lower(i)
   end
 
   return function(ch1, ch2)
     assert(not DEBUG_BOUNDS_CHECKING or 0 <= ch1 and ch1 <= 255)
     assert(not DEBUG_BOUNDS_CHECKING or 0 <= ch2 and ch2 <= 255)
-    return equiv_table[ch1] == equiv_table[ch2]
+    return equivalence_table[ch1] == equivalence_table[ch2]
   end
 end)()
 
@@ -88,7 +65,7 @@ local MatchSession = {
     --   0.0 is returned when |needle| is not a subseqeuence of |haystack|;
     --   returns 1.0 if |needle| is the empty string.
     get_match_score = function(self, haystack, needle)
-      dprintf("haystack: %s, needle: %s", haystack, needle)
+      dprintf('haystack: %s, needle: %s', haystack, needle)
       self:_prepare_for_match(haystack, needle)
 
       local m, n = #needle + 1, #haystack + 1
@@ -181,8 +158,8 @@ local MatchSession = {
     --   haystack {Vector}: the haystack vector
     _calculate_match_coefficients = (function()
       local CharType = {
-        Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0,
-      }
+        Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0, }
+
       return function(self, haystack)
         local n = #haystack + 1
         local coefficients = self._match_coefficients
@@ -215,55 +192,9 @@ local MatchSession = {
   },
 
   __tostring = function(self)
-    return string.format("Matrix:\n\n%s", self._scoreboard)
+    return string.format('Matrix:\n\n%s', self._scoreboard)
   end,
 }
 
-local TEST_CASES = {
-  { "ab/cd/ef", "ace", },
-  { "ab/cd/ef", "bdf", },
-  { "ab/cd/ef", "bdef", },
-  { "ab/cd/ef", "abcdef", },
-  { "ab/cd/ef", "ab/cd/ef", },
-  { "ab/cd/ef", "ac", },
-  { "ab/cd/ef", "ce", },
-  { "ab/cd/ef", "ceg", },
-  { "ab/cd/ef", "", },
-  { "", "", },
-}
+return MatchSession
 
-local function main()
-  local session = setmetatable({}, MatchSession)
-  local r
-
-  local upper = 1000000
-  if DEBUG then
-    upper = 1
-  end
-
-  for idx, test_case in ipairs(TEST_CASES) do
-    local score = session:get_match_score(test_case[1], test_case[2])
-    dprintf("%f", score)
-  end
-
-  for i = 1, upper do
-    -- dprintf("---")
-    -- r = session:get_match_score("ab/cd/ef", "ace")
-    --
-    -- dprintf("---")
-    -- r = session:get_match_score("ab/cd/ef", "bdf")
-    --
-    dprintf("---")
-    r = session:get_match_score("ab/cd/ef", "bdff")
-
-    dprintf("---")
-    r = session:get_match_score("ab/cd/ef", "bgff")
-
-
-    dprintf("---")
-    r = session:get_match_score("foobarsdfsd", "obrrradsfsadr")
-  end
-
-end
-
-main()

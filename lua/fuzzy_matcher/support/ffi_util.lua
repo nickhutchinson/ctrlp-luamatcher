@@ -7,25 +7,22 @@ ffi.cdef[[
 
 -- Converts the given ctype to an opaque identifier that can be used as a table
 -- key.
-local function ctypeid(ctype)
-  return tonumber(ffi.typeof(ctype))
-end
+local function ctypeid(ctype) return tonumber(ffi.typeof(ctype)) end
+
+local ctype_by_type_id = {}
 
 -- Returns, for the given ctype `T`, the ctype `T*`.
-local pointer_type = (function()
+local function pointer_type(ctype)
   -- Cache the derived pointer type; calculating it aborts a LuaJIT trace;
   -- obviously we want to minimise this.
-  local typeid_to_pointer_type = {}
-  return function(ctype)
-    local type_id = ctypeid(ctype)
-    local derived_type = typeid_to_pointer_type[type_id]
-    if derived_type == nil then
-      derived_type = ffi.typeof("$*", ctype)
-      typeid_to_pointer_type[type_id] = derived_type
-    end
-    return derived_type
+  local type_id = ctypeid(ctype)
+  local derived_type = ctype_by_type_id[type_id]
+  if derived_type == nil then
+    derived_type = ffi.typeof("$*", ctype)
+    ctype_by_type_id[type_id] = derived_type
   end
-end)()
+  return derived_type
+end
 
 -- Allocates a struct; tries hard not to abort a LuaJIT trace, unlike
 -- `ffi.new()`.
