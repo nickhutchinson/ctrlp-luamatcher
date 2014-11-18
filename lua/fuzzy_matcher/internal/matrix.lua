@@ -1,5 +1,5 @@
 local ffi = require "ffi"
-local FFIUtil = require "fuzzy_matcher.support.ffi_util"
+local FFIUtil = require "fuzzy_matcher.internal.ffi_util"
 local DEBUG_BOUNDS_CHECKING = false
 
 local cdecl_string = [[ struct {

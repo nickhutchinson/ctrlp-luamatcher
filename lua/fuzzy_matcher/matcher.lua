@@ -1,10 +1,10 @@
-require 'fuzzy_matcher.support.strict'
+require 'fuzzy_matcher.internal.strict'
 local ffi = require 'ffi'
 
-local FFIUtil = require 'fuzzy_matcher.support.ffi_util'
-local Matrix = require 'fuzzy_matcher.support.matrix'
-local Vector = require 'fuzzy_matcher.support.vector'
-local Sort = require 'fuzzy_matcher.support.sort'
+local FFIUtil = require 'fuzzy_matcher.internal.ffi_util'
+local Matrix = require 'fuzzy_matcher.internal.matrix'
+local Vector = require 'fuzzy_matcher.internal.vector'
+local Sort = require 'fuzzy_matcher.internal.sort'
 
 local function printf(...)
   print(string.format(...))
