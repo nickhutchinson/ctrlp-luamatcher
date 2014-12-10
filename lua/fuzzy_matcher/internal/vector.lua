@@ -55,6 +55,7 @@ local Vector = setmetatable({
   clear = function(self)
     ffi.fill(self.data, self.ELEM_SIZE * self.capacity)
   end,
+
   fill = function(self, val)
     for i=0, #self-1 do
       self.data[i] = val

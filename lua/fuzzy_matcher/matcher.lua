@@ -1,7 +1,6 @@
 require 'fuzzy_matcher.internal.strict'
 local ffi = require 'ffi'
 
-local FFIUtil = require 'fuzzy_matcher.internal.ffi_util'
 local Matrix = require 'fuzzy_matcher.internal.matrix'
 local Vector = require 'fuzzy_matcher.internal.vector'
 local Sort = require 'fuzzy_matcher.internal.sort'
@@ -50,11 +49,47 @@ local is_same_letter = (function()
   end
 end)()
 
+local match_coefficient_for_idx = (function()
+  local CharType = {
+    Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0, }
+
+  local function classify(ch)
+    if     is_lower(ch)   then return CharType.Lower
+    elseif is_pathsep(ch) then return CharType.PathSep
+    elseif is_sep(ch)     then return CharType.OtherSep
+    elseif ch == B'.'     then return CharType.Dot
+    else                       return CharType.Other
+    end
+  end
+
+  return function(str, idx)
+    if idx == 1 then return 0.9 end
+
+    local ch = string.byte(str, idx - 1)
+    local last_kind = classify(ch)
+
+    if last_kind == CharType.PathSep then
+      return 0.9
+    elseif last_kind == CharType.OtherSep then
+      return 0.8
+    elseif last_kind == CharType.Lower and is_upper(string.byte(str, idx)) then
+      return 0.75
+    elseif last_kind == CharType.Dot then
+      return 0.7
+    else
+      return 0.0
+    end
+  end
+end)()
+
 local MatchSession = {
   __index = {
-    -- #get_match_score()#
+    -- get_match_score()
     -- Calculates the score if |needle| is to match the candidate string
     -- |haystack|.
+    --
+    -- This is a Longest Common Subsequence-type problem, which we solve using
+    -- dynamic programming. See: http://en.wikipedia.org/wiki/Longest_common_subsequence_problem
     --
     -- Args:
     --   haystack {string}: The haystack.
@@ -65,42 +100,51 @@ local MatchSession = {
     --   0.0 is returned when |needle| is not a subseqeuence of |haystack|;
     --   returns 1.0 if |needle| is the empty string.
     get_match_score = function(self, haystack, needle)
+      if #needle == 0 then
+        return 1.0
+      end
+
       dprintf('haystack: %s, needle: %s', haystack, needle)
       self:_prepare_for_match(haystack, needle)
 
       local m, n = #needle + 1, #haystack + 1
       local normalized_char_score = (1.0 / (m-1) + 1.0 / (n-1)) / 2
 
-      local scoreboard = self._scoreboard
-      local match_coefficients = self._match_coefficients
+      -- Remember folks -- m/i, n/j are the needle and haystack
+      -- lengths/indices respectively.
+
+      -- m x n matrix; follows construction detailed in the Wiki article.
+      local sb = self._scoreboard
+
+      -- Two arrays of length n to track where in the haystack we last matched.
       local match_offsets, match_offsets_prev =
           self._match_offsets, self._match_offsets_prev
 
       local j_start = 0
 
-      for i = 1, scoreboard.m - 1 do
-        for j = j_start + 1, scoreboard.n - 1 do
+      -- Outer loop: needle
+      for i = 1, sb.m - 1 do
+        -- Inner loop: haystack
+        for j = j_start + 1, sb.n - 1 do
           local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
 
           if not is_same_letter(ch_i, ch_j) then
             match_offsets[j] = match_offsets[j-1]
-            scoreboard:set(i, j, math.max(scoreboard(i, j-1),
-                                          scoreboard(i-1, j)))
+            sb:set(i, j, math.max(sb:get(i, j-1), sb:get(i-1, j)))
           else
             j_start = math.min(j_start, j)
 
-            local coefficient = match_coefficients[j]
-            if coefficient == 0 then
+            local c = match_coefficient_for_idx(haystack, j)
+            if c == 0 then
               local distance = j - match_offsets_prev[j-1]
               assert(distance > 0)
-              coefficient = 0.75 / distance
+              c = 0.75 / distance
             end
 
-            local cumulative_score = (scoreboard(i-1, j-1) +
-                normalized_char_score * coefficient)
-            scoreboard:set(i, j, cumulative_score)
+            local cuml_score = sb:get(i-1, j-1) + normalized_char_score * c
+            sb:set(i, j, cuml_score)
 
-            if cumulative_score >= scoreboard(i, match_offsets[j-1]) then
+            if cuml_score >= sb:get(i, match_offsets[j-1]) then
               match_offsets[j] = j
             else
               match_offsets[j] = match_offsets[j-1]
@@ -108,14 +152,19 @@ local MatchSession = {
           end
         end
 
-        local row_had_match = (0 ~= match_offsets[scoreboard.n - 1])
+        local row_had_match = (0 ~= match_offsets[sb.n - 1])
         if not row_had_match then return 0.0 end
 
+        -- swap the match_offsets vectors.
         match_offsets_prev, match_offsets = match_offsets, match_offsets_prev
+
+        -- we need not zero the entire vector; the inner loop runs from
+        -- j_start+1 to sb.n-1. For each j, we might read match_offsets[j-1]
+        -- and we always write match_offsets[j].
         match_offsets[j_start] = 0
       end
 
-      return scoreboard(scoreboard.m-1, scoreboard.n-1)
+      return sb:get(sb.m-1, sb.n-1)
     end,
 
     -- #_prepare_for_match()#
@@ -129,8 +178,6 @@ local MatchSession = {
       self:_reset_vector('_match_offsets', n)
       self:_reset_vector('_match_offsets_prev', n)
       self:_reset_matrix('_scoreboard', m, n)
-      self:_reset_vector('_match_coefficients', n)
-      self:_calculate_match_coefficients(haystack)
     end,
 
     _reset_matrix = function(self, name, m, n)
@@ -151,44 +198,6 @@ local MatchSession = {
       end
       vec.length = n
     end,
-
-    -- #_calculate_match_coefficients()#
-    -- Initialises the _match_coefficients array.
-    -- Args:
-    --   haystack {Vector}: the haystack vector
-    _calculate_match_coefficients = (function()
-      local CharType = {
-        Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0, }
-
-      return function(self, haystack)
-        local n = #haystack + 1
-        local coefficients = self._match_coefficients
-        local kind = CharType.PathSep
-        for i = 1, n - 1 do
-          local ch = string.byte(haystack, i)
-          local last_kind = kind
-
-          if     is_lower(ch)   then kind = CharType.Lower
-          elseif is_pathsep(ch) then kind = CharType.PathSep
-          elseif is_sep(ch)     then kind = CharType.OtherSep
-          elseif ch == B'.'     then kind = CharType.Dot
-          else                       kind = CharType.Other
-          end
-
-          if last_kind == CharType.PathSep then
-            coefficients[i] = 0.9
-          elseif last_kind == CharType.OtherSep then
-            coefficients[i] = 0.8
-          elseif last_kind == CharType.Lower and is_upper(ch) then
-            coefficients[i] = 0.75
-          elseif last_kind == CharType.Dot then
-            coefficients[i] = 0.7
-          else
-            coefficients[i] = 0.0
-          end
-        end
-      end
-    end)(),
   },
 
   __tostring = function(self)
