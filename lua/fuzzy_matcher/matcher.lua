@@ -130,7 +130,14 @@ local MatchSession = {
       -- m x n matrix; follows construction detailed in the Wiki article.
       local sb = self._scoreboard
 
-      -- Two arrays of length n to track where in the haystack we last matched.
+      -- match_offsets_prev tells us where the (i-1)'th needle character
+      -- matched in the haystack. Specifically, match_offsets_prev[j] describes
+      -- the rightmost position in the range [0, j] where we successfully
+      -- matched.
+      --
+      -- match_offsets_prev is read from only; we populate match_offsets in the
+      -- inner loop, and swap this buffer with match_offsets_prev at the end of
+      -- the outer loop.
       local match_offsets, match_offsets_prev =
           self._match_offsets, self._match_offsets_prev
 
