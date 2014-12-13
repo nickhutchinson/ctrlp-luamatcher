@@ -23,30 +23,40 @@ if not is_in_path(script_dir) then
     require 'fuzzy_matcher.matcher'
     package.path = prev
 end
-
-log = (function()
-  local log = io.open("/Users/Nick/Desktop/lua_log.txt", "a+")
-  local counter = 0
-  log:setvbuf("line")
-  return function(...)
-    log:write('[', tostring(counter), ']: ')
-    log:write(string.format(...), "\n")
-    counter = counter + 1
-  end
-end)()
+--------------------------------------------------------------------------------
 
 fuzzy_lua_find_match = (function()
-  local ms = setmetatable({}, require 'fuzzy_matcher.matcher')
-  local inspect = require "inspect"
-  local ffi = require 'ffi'
+  local Matcher = require'fuzzy_matcher.matcher'
 
-  local get_match_score_proc = ms.get_match_score
+  local DEBUG = false
+  local match_session = setmetatable({}, Matcher)
 
-  ffi.cdef[[
-    uint64_t mach_absolute_time();
-  ]]
+  -- Caching this appears to speed things up.
+  local get_match_score = match_session.get_match_score
 
-  local C = ffi.C
+  local get_monotonic_nanos = (function()
+    if not DEBUG then return function() return -1 end end
+
+    -- FIXME: Linux timers too
+    local ffi = require 'ffi'
+    local C = ffi.C
+    ffi.cdef[[ uint64_t mach_absolute_time(); ]]
+    return function() return C.mach_absolute_time() end
+  end)()
+
+  local dprintf = (function()
+    if not DEBUG then return function () end end
+
+    local counter = 0
+    local log_handle = io.open("/tmp/fuzzy_lua_log.txt", "a+")
+    log_handle:setvbuf("line")
+
+    return function(...)
+      log_handle:write('[', tostring(counter), ']: ')
+      log_handle:write(string.format(...), "\n")
+      counter = counter + 1
+    end
+  end)()
 
   local vimlist_to_table = (function()
     -- Args:
@@ -58,7 +68,7 @@ fuzzy_lua_find_match = (function()
     -- happens every keystroke (and every time the user navigates up/down the
     -- list?!) It's worth caching the results.
     --
-    -- FIXME: This assumes it's safe to compare a vim list by identity -- it
+    -- XXX: This assumes it's safe to compare a vim list by identity -- it
     -- looks like CtrlP doesn't manipulate a list after creation, but it's
     -- something to look out for.
     local last_vimlist = nil
@@ -82,48 +92,60 @@ fuzzy_lua_find_match = (function()
   end)()
 
 
-  return function(_A)
-    local start = C.mach_absolute_time()
+  local function pcalled(f)
+    return function (...)
+      local success, result = pcall(f, ...)
+      if not success then
+        dprintf("Failed call: %s", result)
+        return nil
+      else
+        return result
+      end
+    end
+  end
+
+  return pcalled(function(_A)
+    local start = get_monotonic_nanos()
 
     local items_vimlist, str, limit, results_vimlist =
         _A[0], _A[1], _A[2], _A[3]
 
     local items = vimlist_to_table(items_vimlist)
 
-    local match_elapsed = 0
+    local sort_elapsed = 0
     local results_elapsed = 0
+
     local results = {}
-
     for _, item in ipairs(items) do
-      local start
-
-      start = C.mach_absolute_time()
-      local mr = get_match_score_proc(ms, item, str)
-      match_elapsed = match_elapsed + (C.mach_absolute_time() - start)
-
-      if mr ~= 0 then
-        table.insert(results, {item, mr})
-      end
+      local score = get_match_score(match_session, item, str)
+      if score ~= 0 then table.insert(results, {item, score}) end
     end
 
-    local elapsed = C.mach_absolute_time() - start
+    do
+      local start = get_monotonic_nanos()
+      table.sort(results, function(a, b) return a[2] > b[2] end)
+      sort_elapsed = get_monotonic_nanos() - start
+    end
 
-    log("Fetch request elapsed: %dms; { str= %s, limit= %d, inputsize= %d }",
-        tonumber(elapsed) / 1000000, str, limit, #items)
-    log("Match elapsed: %dms", tonumber(match_elapsed)/1000000)
-  end
+    for i=1, math.min(#results, limit) do
+      results_vimlist:add(results[i][1])
+    end
+
+    local elapsed = get_monotonic_nanos() - start
+
+    dprintf("Fetch request elapsed: %dms { str= %s, limit= %d, inputsize= %d }",
+            tonumber(elapsed) / 1000000, str, limit, #items)
+    dprintf("Sort elapsed: %dms", tonumber(sort_elapsed)/1000000)
+    dprintf("Raw result count: %d", #results)
+  end)
 end)()
 
 EOF
 
-function! fuzzylua#Hello(items, str, limit)
+function! fuzzylua#Match(items, str, limit, mmode, ispath, crfile, regex)
     let l:results = []
     let l:_ = luaeval("fuzzy_lua_find_match(_A)", [ a:items, a:str, a:limit, l:results])
     return l:results
-endfunction
-
-function! fuzzylua#Match(items, str, limit, mmode, ispath, crfile, regex)
-    return fuzzylua#Hello(a:items, a:str, a:limit)
     " Arguments:
     " |
     " +- a:items  : The full list of items to search in.
