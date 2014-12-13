@@ -87,7 +87,7 @@ local function is_subset(haystack, needle)
   local n = 1
 
   while m <= #needle and n <= #haystack do
-    if is_same_letter(string.byte(needle, m),  string.byte(haystack, n)) then
+    if is_same_letter(string.byte(needle, m), string.byte(haystack, n)) then
       m = m + 1
     end
     n = n + 1
@@ -141,17 +141,20 @@ local MatchSession = {
           local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
 
           if not is_same_letter(ch_i, ch_j) then
-            dprintf("No match<%d, %d = %c, %c>", i,j,ch_i,ch_j)
+            dprintf("No match<%d, %d = %c, %c>", i, j, ch_i, ch_j)
             match_offsets[j] = match_offsets[j-1]
             sb:set(i, j, math.max(sb:get(i, j-1), sb:get(i-1, j)))
           else
-            dprintf("Match<%d, %d = %c, %c>", i,j,ch_i,ch_j)
-
             local c = match_coefficient_for_idx(haystack, j)
             if c == 0 then
               local distance = j - match_offsets_prev[j-1]
               assert(distance > 0)
               c = 0.75 / distance
+              dprintf("Match<%d, %d = %c/%c, coef=%f, dist=%d>",
+                      i, j, ch_i, ch_j, c, distance)
+            else
+              dprintf("Match<%d, %d = %c/%c, coef=%f, dist=n/a>",
+                      i, j, ch_i, ch_j, c)
             end
 
             local cuml_score = sb:get(i-1, j-1) + normalized_char_score * c
@@ -193,12 +196,12 @@ local MatchSession = {
     --   needle {string}:
     _prepare_for_match = function(self, haystack, needle)
       local m, n = #needle + 1, #haystack + 1
-      self:_reset_vector('_match_offsets', n)
-      self:_reset_vector('_match_offsets_prev', n)
-      self:_reset_matrix('_scoreboard', m, n)
+      self:_prepare_vector('_match_offsets', n)
+      self:_prepare_vector('_match_offsets_prev', n)
+      self:_prepare_matrix('_scoreboard', m, n)
     end,
 
-    _reset_matrix = function(self, name, m, n)
+    _prepare_matrix = function(self, name, m, n)
       local mat = self[name]
       if not mat or mat.capacity < m * n then
         mat = Matrix(value_type)(m, n)
@@ -209,7 +212,7 @@ local MatchSession = {
       end
     end,
 
-    _reset_vector = function(self, name, n)
+    _prepare_vector = function(self, name, n)
       local vec = self[name]
       if not vec or vec.capacity < n then
         vec = Vector(value_type)(n)

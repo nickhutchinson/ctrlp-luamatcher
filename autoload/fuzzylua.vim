@@ -34,10 +34,10 @@ fuzzy_lua_find_match = (function()
   -- Caching this appears to speed things up.
   local get_match_score = match_session.get_match_score
 
-  local get_monotonic_nanos = (function()
+  local monotonic_nanoseconds = (function()
     if not DEBUG then return function() return -1 end end
 
-    -- FIXME: Linux timers too
+    -- FIXME: Support benchmarks on Linux too.
     local ffi = require 'ffi'
     local C = ffi.C
     ffi.cdef[[ uint64_t mach_absolute_time(); ]]
@@ -64,7 +64,7 @@ fuzzy_lua_find_match = (function()
     -- Returns:
     --   An equivalent Lua table
     --
-    -- Marshalling a big vim list (100,000 elems) into Lua takes 50ms. This
+    -- Marshalling a big vim list (100,000 elems) into Lua can take 50ms. This
     -- happens every keystroke (and every time the user navigates up/down the
     -- list?!) It's worth caching the results.
     --
@@ -105,36 +105,43 @@ fuzzy_lua_find_match = (function()
   end
 
   return pcalled(function(_A)
-    local start = get_monotonic_nanos()
+    local start = monotonic_nanoseconds()
 
-    local items_vimlist, str, limit, results_vimlist =
+    local candidates_vimlist, filter, limit, results_vimlist =
         _A[0], _A[1], _A[2], _A[3]
-
-    local items = vimlist_to_table(items_vimlist)
+    local candidates = vimlist_to_table(candidates_vimlist)
 
     local sort_elapsed = 0
     local results_elapsed = 0
 
     local results = {}
-    for _, item in ipairs(items) do
-      local score = get_match_score(match_session, item, str)
+    for _, item in ipairs(candidates) do
+      local score = get_match_score(match_session, item, filter)
       if score ~= 0 then table.insert(results, {item, score}) end
     end
 
     do
-      local start = get_monotonic_nanos()
-      table.sort(results, function(a, b) return a[2] > b[2] end)
-      sort_elapsed = get_monotonic_nanos() - start
+      local start = monotonic_nanoseconds()
+      table.sort(results, function(a, b)
+        local result = a[2] - b[2]
+        if result ~= 0 then
+          return result > 0
+        else
+          return a[1] < b[1]
+        end
+      end)
+      sort_elapsed = monotonic_nanoseconds() - start
     end
 
     for i=1, math.min(#results, limit) do
       results_vimlist:add(results[i][1])
     end
 
-    local elapsed = get_monotonic_nanos() - start
+    local elapsed = monotonic_nanoseconds() - start
 
-    dprintf("Fetch request elapsed: %dms { str= %s, limit= %d, inputsize= %d }",
-            tonumber(elapsed) / 1000000, str, limit, #items)
+    dprintf("Fetch request elapsed: %dms " ..
+            "{ filter= %s, limit= %d, inputsize= %d }",
+            tonumber(elapsed) / 1000000, filter, limit, #candidates)
     dprintf("Sort elapsed: %dms", tonumber(sort_elapsed)/1000000)
     dprintf("Raw result count: %d", #results)
   end)
@@ -142,10 +149,16 @@ end)()
 
 EOF
 
-function! fuzzylua#Match(items, str, limit, mmode, ispath, crfile, regex)
+function! fuzzylua#Match(candidates, filter, limit, mmode, ispath, crfile, regex)
     let l:results = []
-    let l:_ = luaeval("fuzzy_lua_find_match(_A)", [ a:items, a:str, a:limit, l:results])
+    let l:_ = luaeval(
+          \ "fuzzy_lua_find_match(_A)",
+          \ [ a:candidates, a:filter, a:limit, l:results])
     return l:results
+
+    " XXX For now, I'm not interested in handling anything except the
+    " full-line mode.
+
     " Arguments:
     " |
     " +- a:items  : The full list of items to search in.
