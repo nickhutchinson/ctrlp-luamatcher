@@ -84,7 +84,7 @@ local match_coefficient_for_idx = (function()
   end
 end)()
 
-local function is_subset(haystack, needle)
+local function is_subsequence_of(needle, haystack)
   local m = 1
   local n = 1
 
@@ -116,7 +116,7 @@ local MatchSession = {
     --   returns 1.0 if |needle| is the empty string.
     get_match_score = function(self, haystack, needle)
       if #needle == 0 then return 1.0 end
-      if not is_subset(haystack, needle) then return 0.0 end
+      if not is_subsequence_of(needle, haystack) then return 0.0 end
 
       dprintf('haystack: %s, needle: %s', haystack, needle)
       self:_prepare_for_match(haystack, needle)
@@ -181,9 +181,8 @@ local MatchSession = {
           end
         end
 
-        dprintf("<<Needle %d; current offsets %s", i, match_offsets)
         local row_had_match = (0 ~= match_offsets[sb.n - 1])
-        if not row_had_match then return 0.0 end
+        assert(row_had_match)
 
         -- swap the match_offsets vectors.
         match_offsets_prev, match_offsets = match_offsets, match_offsets_prev
