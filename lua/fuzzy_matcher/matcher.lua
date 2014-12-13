@@ -82,6 +82,19 @@ local match_coefficient_for_idx = (function()
   end
 end)()
 
+local function is_subset(haystack, needle)
+  local m = 1
+  local n = 1
+
+  while m <= #needle and n <= #haystack do
+    if is_same_letter(string.byte(needle, m),  string.byte(haystack, n)) then
+      m = m + 1
+    end
+    n = n + 1
+  end
+  return m == #needle + 1
+end
+
 local MatchSession = {
   __index = {
     -- get_match_score()
@@ -100,9 +113,8 @@ local MatchSession = {
     --   0.0 is returned when |needle| is not a subseqeuence of |haystack|;
     --   returns 1.0 if |needle| is the empty string.
     get_match_score = function(self, haystack, needle)
-      if #needle == 0 then
-        return 1.0
-      end
+      if #needle == 0 then return 1.0 end
+      if not is_subset(haystack, needle) then return 0.0 end
 
       dprintf('haystack: %s, needle: %s', haystack, needle)
       self:_prepare_for_match(haystack, needle)
