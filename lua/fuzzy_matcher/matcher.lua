@@ -129,10 +129,11 @@ local MatchSession = {
           local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
 
           if not is_same_letter(ch_i, ch_j) then
+            dprintf("No match<%d, %d = %c, %c>", i,j,ch_i,ch_j)
             match_offsets[j] = match_offsets[j-1]
             sb:set(i, j, math.max(sb:get(i, j-1), sb:get(i-1, j)))
           else
-            j_start = math.min(j_start, j)
+            dprintf("Match<%d, %d = %c, %c>", i,j,ch_i,ch_j)
 
             local c = match_coefficient_for_idx(haystack, j)
             if c == 0 then
@@ -149,9 +150,14 @@ local MatchSession = {
             else
               match_offsets[j] = match_offsets[j-1]
             end
+
+            if match_offsets[j-1] == 0 then
+              j_start = j
+            end
           end
         end
 
+        dprintf("<<Needle %d; current offsets %s", i, match_offsets)
         local row_had_match = (0 ~= match_offsets[sb.n - 1])
         if not row_had_match then return 0.0 end
 
