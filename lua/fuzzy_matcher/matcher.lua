@@ -192,6 +192,7 @@ local MatchSession = {
         mat = Matrix(value_type)(m, n)
         self[name] = mat
       else
+        mat:clear()
         mat:reshape(m, n)
       end
     end,
