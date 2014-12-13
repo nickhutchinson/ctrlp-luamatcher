@@ -49,6 +49,8 @@ local is_same_letter = (function()
   end
 end)()
 
+-- Coefficients inspired by the mighty Command-T
+-- (https://github.com/wincent/Command-T) and lightly tweaked.
 local match_coefficient_for_idx = (function()
   local CharType = {
     Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0, }
@@ -63,13 +65,13 @@ local match_coefficient_for_idx = (function()
   end
 
   return function(str, idx)
-    if idx == 1 then return 0.9 end
+    if idx == 1 then return 0.85 end
 
     local ch = string.byte(str, idx - 1)
     local last_kind = classify(ch)
 
     if last_kind == CharType.PathSep then
-      return 0.9
+      return 0.85
     elseif last_kind == CharType.OtherSep then
       return 0.8
     elseif last_kind == CharType.Lower and is_upper(string.byte(str, idx)) then
