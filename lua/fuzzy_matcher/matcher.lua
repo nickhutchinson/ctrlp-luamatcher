@@ -1,6 +1,10 @@
-require 'fuzzy_matcher.internal.strict'
-local ffi = require 'ffi'
+local DEBUG = false
 
+if DEBUG then
+  require 'fuzzy_matcher.internal.strict'
+end
+
+local ffi = require 'ffi'
 local Matrix = require 'fuzzy_matcher.internal.matrix'
 local Vector = require 'fuzzy_matcher.internal.vector'
 
@@ -8,7 +12,6 @@ local function printf(...)
   print(string.format(...))
 end
 
-local DEBUG = false
 local function NOOP() end
 
 local dprintf = NOOP
