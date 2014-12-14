@@ -17,5 +17,5 @@ Plugin 'nickhutchinson/ctrlp-luamatcher'
 Then,  add the following to your .vimrc:
 
 ```vim
-let g:ctrlp_match_func  = {'match' : 'fuzzylua#Match'}
+let g:ctrlp_match_func  = {'match' : 'ctrlp_luamatcher#Match'}
 ```

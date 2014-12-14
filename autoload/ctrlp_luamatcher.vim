@@ -1,4 +1,4 @@
-let s:path = expand('<sfile>:p:h')
+let s:current_file_dir = expand('<sfile>:p:h')
 
 lua <<EOF
 -- Reload our fuzzy_matcher... modules.
@@ -15,17 +15,18 @@ local function is_in_path(p)
     return false
 end
 
-local script_dir = string.format('%s/../lua/?.lua', vim.eval('s:path'))
+local package_path_entry = string.format(
+    '%s/../lua/?.lua', vim.eval('s:current_file_dir'))
 
-if not is_in_path(script_dir) then
+if not is_in_path(package_path_entry) then
     local prev = package.path
-    package.path = string.format('%s;%s', script_dir, package.path)
+    package.path = string.format('%s;%s', package_path_entry, package.path)
     require 'fuzzy_matcher.matcher'
     package.path = prev
 end
 --------------------------------------------------------------------------------
 
-fuzzy_lua_find_match = (function()
+ctrlp_luamatcher_match_impl = (function()
   local Matcher = require'fuzzy_matcher.matcher'
 
   local DEBUG = false
@@ -149,10 +150,11 @@ end)()
 
 EOF
 
-function! fuzzylua#Match(candidates, filter, limit, mmode, ispath, crfile, regex)
+function! ctrlp_luamatcher#Match( candidates, filter, limit, mmode, ispath,
+      \ crfile, regex)
     let l:results = []
     let l:_ = luaeval(
-          \ "fuzzy_lua_find_match(_A)",
+          \ "ctrlp_luamatcher_match_impl(_A)",
           \ [ a:candidates, a:filter, a:limit, l:results])
     return l:results
 
