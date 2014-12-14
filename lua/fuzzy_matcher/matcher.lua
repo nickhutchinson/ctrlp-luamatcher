@@ -3,7 +3,6 @@ local ffi = require 'ffi'
 
 local Matrix = require 'fuzzy_matcher.internal.matrix'
 local Vector = require 'fuzzy_matcher.internal.vector'
-local Sort = require 'fuzzy_matcher.internal.sort'
 
 local function printf(...)
   print(string.format(...))

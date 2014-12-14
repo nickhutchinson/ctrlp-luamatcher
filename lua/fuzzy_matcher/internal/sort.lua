@@ -1,3 +1,6 @@
+-- XXX: This module is unused/untested at present; table.sort seems fast
+-- enough, even when the table is large (tens of thousands of elements).
+
 local function swap(data, a, b)
   data[a], data[b] = data[b], data[a]
 end
