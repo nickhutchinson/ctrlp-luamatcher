@@ -30,10 +30,10 @@ ctrlp_luamatcher_match_impl = (function()
   local Matcher = require'fuzzy_matcher.matcher'
 
   local DEBUG = false
-  local match_session = setmetatable({}, Matcher)
+  local matcher = Matcher()
 
   -- Caching this appears to speed things up.
-  local get_match_score = match_session.get_match_score
+  local match = matcher.match
 
   local monotonic_nanoseconds = (function()
     if not DEBUG then return function() return -1 end end
@@ -108,7 +108,7 @@ ctrlp_luamatcher_match_impl = (function()
   return pcalled(function(_A)
     local start = monotonic_nanoseconds()
 
-    local candidates_vimlist, filter, limit, results_vimlist =
+    local candidates_vimlist, query, limit, results_vimlist =
         _A[0], _A[1], _A[2], _A[3]
     local candidates = vimlist_to_table(candidates_vimlist)
 
@@ -116,9 +116,9 @@ ctrlp_luamatcher_match_impl = (function()
     local results_elapsed = 0
 
     local results = {}
-    for _, item in ipairs(candidates) do
-      local score = get_match_score(match_session, item, filter)
-      if score ~= 0 then table.insert(results, {item, score}) end
+    for _, candidate in ipairs(candidates) do
+      local score = match(matcher, query, candidate)
+      if score ~= 0 then table.insert(results, {candidate, score}) end
     end
 
     do
@@ -141,8 +141,8 @@ ctrlp_luamatcher_match_impl = (function()
     local elapsed = monotonic_nanoseconds() - start
 
     dprintf("Fetch request elapsed: %dms " ..
-            "{ filter= %s, limit= %d, inputsize= %d }",
-            tonumber(elapsed) / 1000000, filter, limit, #candidates)
+            "{ query= %s, limit= %d, inputsize= %d }",
+            tonumber(elapsed) / 1000000, query, limit, #candidates)
     dprintf("Sort elapsed: %dms", tonumber(sort_elapsed)/1000000)
     dprintf("Raw result count: %d", #results)
   end)
@@ -150,12 +150,12 @@ end)()
 
 EOF
 
-function! ctrlp_luamatcher#Match( candidates, filter, limit, mmode, ispath,
+function! ctrlp_luamatcher#Match( candidates, query, limit, mmode, ispath,
       \ crfile, regex)
     let l:results = []
     let l:_ = luaeval(
           \ "ctrlp_luamatcher_match_impl(_A)",
-          \ [ a:candidates, a:filter, a:limit, l:results])
+          \ [ a:candidates, a:query, a:limit, l:results])
     return l:results
 
     " XXX For now, I'm not interested in handling anything except the
