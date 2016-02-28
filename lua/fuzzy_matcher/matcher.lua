@@ -1,241 +1,285 @@
-local DEBUG = false
-
-if DEBUG then
-  require 'fuzzy_matcher.internal.strict'
-end
-
 local ffi = require 'ffi'
-local Matrix = require 'fuzzy_matcher.internal.matrix'
+
+require 'fuzzy_matcher.internal.strict'
 local Vector = require 'fuzzy_matcher.internal.vector'
 
+local DEBUG = false
+
+ffi.cdef[[
+  float roundf(float x);
+  float nextafterf(float x, float y);
+]]
+
+local NAN = 0/0
+
 local function printf(...)
-  print(string.format(...))
+  io.write(string.format(...))
 end
 
 local function NOOP() end
 
-local dprintf = NOOP
-if DEBUG then dprintf = printf end
+local DLOG = NOOP
+if DEBUG then DLOG = printf end
 
-local DEBUG_BOUNDS_CHECKING = false
---------------------------------------------------------------------------------
-local value_type = ffi.typeof'double'
+local SEPARATOR, LOWERCASE, UPPERCASE = 1, 2, 3
 
--- Converts character `ch` to its ascii value.
-local function B(ch) return string.byte(ch, 1, 1) end
+-- Precomputing this table makes us 10% faster.
+local kCharTypeLUT = (function()
+  -- Converts character `ch` to its ascii value.
+  local function B(ch) return string.byte(ch, 1, 1) end
 
-local function is_upper(ch) return B'A' <= ch and ch <= B'Z' end
-local function is_lower(ch) return B'a' <= ch and ch <= B'z' end
-local function is_digit(ch) return B'0' <= ch and ch <= B'9' end
-local function is_alpha(ch) return is_upper(ch) or is_lower(ch) end
-local function is_pathsep(ch) return ch == B'/' or ch == B'\\' end
-local function is_sep(ch)
-  return ch == B'/' or ch == B'\\' or ch == B' ' or ch == B'_' or ch == B'-'
+  local ret = Vector('int8_t', 256)
+  for ch = 0, 255 do
+    if B'A' <= ch and ch <= B'Z' then
+      ret[ch] = UPPERCASE
+    elseif B'a' <= ch and ch <= B'z' then
+      ret[ch] = LOWERCASE
+    elseif ch == B'/' or ch == B'\\' or ch == B' ' or ch == B'_' or ch == B'-' then
+      ret[ch] = SEPARATOR
+    else
+      ret[ch] = 0
+    end
+  end
+  return ret
+end)()
+
+local function is_upper(ch) return kCharTypeLUT[ch] == UPPERCASE end
+local function is_lower(ch) return kCharTypeLUT[ch] == LOWERCASE end
+local function is_separator(ch) return kCharTypeLUT[ch] == SEPARATOR end
+local function to_lower(ch)
+  if is_upper(ch) then return ch + 32 else return ch end
 end
 
-
-local is_same_letter = (function()
-  local function to_lower(ch)
-    if is_upper(ch) then return ch + B'a' - B'A' else return ch end
-  end
-
-  local equivalence_table = Vector('char')(256)
-  for i = 0, 255 do
-    equivalence_table[i] = to_lower(i)
-  end
-
-  return function(ch1, ch2)
-    assert(not DEBUG_BOUNDS_CHECKING or 0 <= ch1 and ch1 <= 255)
-    assert(not DEBUG_BOUNDS_CHECKING or 0 <= ch2 and ch2 <= 255)
-    return equivalence_table[ch1] == equivalence_table[ch2]
-  end
-end)()
-
--- Coefficients inspired by the mighty Command-T
--- (https://github.com/wincent/Command-T) and lightly tweaked.
-local match_coefficient_for_idx = (function()
-  local CharType = {
-    Lower = 1, PathSep = 2, OtherSep = 3, Dot = 4, Other = 0, }
-
-  local function classify(ch)
-    if     is_lower(ch)   then return CharType.Lower
-    elseif is_pathsep(ch) then return CharType.PathSep
-    elseif is_sep(ch)     then return CharType.OtherSep
-    elseif ch == B'.'     then return CharType.Dot
-    else                       return CharType.Other
-    end
-  end
-
-  return function(str, idx)
-    if idx == 1 then return 0.85 end
-
-    local ch = string.byte(str, idx - 1)
-    local last_kind = classify(ch)
-
-    if last_kind == CharType.PathSep then
-      return 0.85
-    elseif last_kind == CharType.OtherSep then
-      return 0.8
-    elseif last_kind == CharType.Lower and is_upper(string.byte(str, idx)) then
-      return 0.75
-    elseif last_kind == CharType.Dot then
-      return 0.7
-    else
-      return 0.0
-    end
-  end
-end)()
-
-local function is_subsequence_of(needle, haystack)
+local function is_subsequence_of(query, candidate)
   local m = 1
   local n = 1
 
-  while m <= #needle and n <= #haystack do
-    if is_same_letter(string.byte(needle, m), string.byte(haystack, n)) then
+  while m <= #query and n <= #candidate do
+    local i_ch = string.byte(query, m)
+    local j_ch = string.byte(candidate, n)
+    if i_ch == j_ch or to_lower(i_ch) == to_lower(j_ch) then
       m = m + 1
     end
     n = n + 1
   end
-  return m == #needle + 1
+  return m == #query + 1
 end
 
-local MatchSession = {
-  __index = {
-    -- get_match_score()
-    -- Calculates the score if |needle| is to match the candidate string
-    -- |haystack|.
-    --
-    -- This is a Longest Common Subsequence-type problem, which we solve using
-    -- dynamic programming. See: http://en.wikipedia.org/wiki/Longest_common_subsequence_problem
-    --
-    -- Args:
-    --   haystack {string}: The haystack.
-    --   needle   {string}: The needle.
-    --
-    -- Returns:
-    --   A {number} between 0.0 and 1.0.
-    --   0.0 is returned when |needle| is not a subseqeuence of |haystack|;
-    --   returns 1.0 if |needle| is the empty string.
-    get_match_score = function(self, haystack, needle)
-      if #needle == 0 then return 1.0 end
-      if not is_subsequence_of(needle, haystack) then return 0.0 end
+local Matcher = setmetatable(
+  {
+    __index = {
+      __init = function(self)
+        self._scoreboard = Vector('float', 8 * 64)
+        self._traceback = Vector('int', 8)
+        self._match_offsets = Vector('int', 64)
+        self._match_offsets_prev = Vector('int', 64)
+        self._debug_logging_enabled = false
+        return self
+      end,
 
-      dprintf('haystack: %s, needle: %s', haystack, needle)
-      self:_prepare_for_match(haystack, needle)
+      set_debug_logging_enabled = function(self, val)
+        self._debug_logging_enabled = val
+      end,
 
-      local m, n = #needle + 1, #haystack + 1
-      local normalized_char_score = (1.0 / (m-1) + 1.0 / (n-1)) / 2
+      debug_logging_enabled = function(self)
+        return self._debug_logging_enabled
+      end,
 
-      -- Remember folks -- m/i, n/j are the needle and haystack
-      -- lengths/indices respectively.
+      -- :param query: the query string
+      -- :param candidate: the candidate string
+      -- :return: tuple of (match_score, trace_buffer)
+      match = function(self, query, candidate)
+        -- Algorithm is based on:
+        -- - Needleman-Wunsch global sequence alignment algorithm:
+        -- <https://en.wikipedia.org/wiki/Needleman–Wunsch_algorithm>
+        -- - Cmd-T, the fuzzy finder plug-in for Vim:
+        -- <https://github.com/wincent/command-t/blob/master/ruby/command-t/match.c>
+        --
+        -- ``X``: The m x n scoreboard matrix, filled in row-by-row. First row
+        -- and first column of X are all zeros, to remove the need for boundary
+        -- checks when accessing the matrix. (We are assured that X(i - 1, j - 1)
+        -- is valid, but need to subtract 1 when indexing into ``candidate`` or
+        -- ``query``.)
+        --
+        -- ``Y_1``: Used to track the position of the last match, so we can
+        -- calculate the distance of the gap between matches. Concretely,
+        -- Y_1[j] is the rightmost position in the range [0, j] where we last
+        -- successfully matched on the previous row. ``Y_1`` is only read from
+        -- we fill in ``Y`` as we go, which then becomes ``Y_1`` on the next
+        -- row.
+        --
+        -- ``jStart``: where we start searching the candidate
+        if #query == 0 then
+          return math.huge, nil
+        elseif not is_subsequence_of(query, candidate) then
+          return 0.0, nil
+        end
 
-      -- m x n matrix; follows construction detailed in the Wiki article.
-      local sb = self._scoreboard
+        local m, n = #query + 1, #candidate + 1
+        Vector.reset(self._scoreboard, m * n)
+        Vector.reset(self._traceback, #query)
+        Vector.reset(self._match_offsets, n)
+        Vector.reset(self._match_offsets_prev, n)
 
-      -- match_offsets_prev tells us where the (i-1)'th needle character
-      -- matched in the haystack. Specifically, match_offsets_prev[j] describes
-      -- the rightmost position in the range [0, j] where we successfully
-      -- matched.
-      --
-      -- match_offsets_prev is read from only; we populate match_offsets in the
-      -- inner loop, and swap this buffer with match_offsets_prev at the end of
-      -- the outer loop.
-      local match_offsets, match_offsets_prev =
-          self._match_offsets, self._match_offsets_prev
+        local X = self._scoreboard
+        local Y, Y_1 = self._match_offsets, self._match_offsets_prev
+        local Z = self._traceback
 
-      local j_start = 0
+        -- Fill the scoreboard
+        local j_start = 0
+        for i = 1, m - 1 do
+          Y, Y_1 = Y_1, Y
+          Y[j_start] = 0
+          for j = j_start + 1, n - 1 do
+            local i_ch = string.byte(query, i)
+            local j_ch = string.byte(candidate, j)
+            local j_ch_1 = j > 1 and string.byte(candidate, j - 1) or 0
 
-      -- Outer loop: needle
-      for i = 1, sb.m - 1 do
-        -- Inner loop: haystack
-        for j = j_start + 1, sb.n - 1 do
-          local ch_i, ch_j = string.byte(needle, i), string.byte(haystack, j)
+            if i_ch == j_ch or to_lower(i_ch) == to_lower(j_ch) then
+              -- Either:
+              -- - jCh is "significant" and gets a large, fixed score.
+              -- - there are no special characters behind jCh, and score
+              --   decays sharply as we get further from previous match.
+              local c
+              if j == 1 then
+                c = 0.95
+              elseif is_separator(j_ch_1) or
+                  is_upper(j_ch) and is_lower(j_ch_1) then
+                c = 0.9
+              else
+                c = 0.6 * math.pow(j - Y_1[j - 1], -2.0)
+              end
 
-          if not is_same_letter(ch_i, ch_j) then
-            dprintf("No match<%d, %d = %c, %c>", i, j, ch_i, ch_j)
-            match_offsets[j] = match_offsets[j-1]
-            sb:set(i, j, math.max(sb:get(i, j-1), sb:get(i-1, j)))
-          else
-            local c = match_coefficient_for_idx(haystack, j)
-            if c == 0 then
-              local distance = j - match_offsets_prev[j-1]
-              assert(distance > 0)
-              c = 0.75 / distance
-              dprintf("Match<%d, %d = %c/%c, coef=%f, dist=%d>",
-                      i, j, ch_i, ch_j, c, distance)
+              local score = X[(i - 1) * n + (j - 1)] + c
+              local EPSILON = 1e-4
+              if math.abs(score - X[i * n + (j - 1)]) <= EPSILON then
+                -- Break ties using nextafterf(). We get more sensible
+                -- tracebacks in cases where a query character matches multiple
+                -- locations in the candidate equally well.
+                -- For example, we want to match 'b' against the 'B' at index 7
+                -- here:
+                --       B a B a B a B a b
+                --     b 1 2 3 4 5 6 7 8 9
+                X[i * n + j] = ffi.C.nextafterf(X[i * n + (j - 1)], math.huge)
+              else
+                X[i * n + j] = math.max(score, X[i * n + (j - 1)])
+              end
+
+              Y[j] = j
+              if Y[j - 1] == 0 then j_start = j end
+
+              DLOG("+ %c, %c; c(%d, %d)=%f\n", i_ch, j_ch, i, j, c)
+
             else
-              dprintf("Match<%d, %d = %c/%c, coef=%f, dist=n/a>",
-                      i, j, ch_i, ch_j, c)
-            end
-
-            local cuml_score = sb:get(i-1, j-1) + normalized_char_score * c
-            sb:set(i, j, cuml_score)
-
-            if cuml_score >= sb:get(i, match_offsets[j-1]) then
-              match_offsets[j] = j
-            else
-              match_offsets[j] = match_offsets[j-1]
-            end
-
-            if match_offsets[j-1] == 0 then
-              j_start = j
+              X[i * n + j] = X[i * n + (j - 1)]
+              Y[j] = Y[j - 1]
+              DLOG("- %c, %c; X(%d, %d)=%f\n", i_ch, j_ch, i, j, X[i * n + j])
             end
           end
         end
 
-        local row_had_match = (0 ~= match_offsets[sb.n - 1])
-        assert(row_had_match)
+        -- Compute the traceback: walk back from the last cell of the matrix to
+        -- determine which characters of the candidate string are matched by
+        -- the query.
+        local j = n - 1
+        for i = m - 1, 1, -1 do
+          while j > 0 do
+            if X[i * n + (j - 1)] < X[i * n + j] then
+              Z[i - 1] = j - 1
+              j = j - 1
+              break
+            else
+              j = j - 1
+            end
+          end
+        end
 
-        -- swap the match_offsets vectors.
-        match_offsets_prev, match_offsets = match_offsets, match_offsets_prev
+        -- Normalize the score to account for the length of the query.
+        local match_score = X[(m - 1) * n + (n - 1)] / (m - 1)
 
-        -- we need not zero the entire vector; the inner loop runs from
-        -- j_start+1 to sb.n-1. For each j, we might read match_offsets[j-1]
-        -- and we always write match_offsets[j].
-        match_offsets[j_start] = 0
-      end
+        -- roundf to 2dp so we get a sort order that's more resilient to small
+        -- changes in the match score.
+        match_score = ffi.C.roundf(match_score * 100.0) / 100.0
 
-      return sb:get(sb.m-1, sb.n-1)
-    end,
+        local median = X[#X/2]
 
-    -- #_prepare_for_match()#
-    -- Resets the internal state before a run; ensures the match vectors, as
-    -- well as the scoreboard matrix are allocated.
-    -- Args:
-    --   haystack {string}:
-    --   needle {string}:
-    _prepare_for_match = function(self, haystack, needle)
-      local m, n = #needle + 1, #haystack + 1
-      self:_prepare_vector('_match_offsets', n)
-      self:_prepare_vector('_match_offsets_prev', n)
-      self:_prepare_matrix('_scoreboard', m, n)
-    end,
+        if self:debug_logging_enabled() then
+          printf('---\n')
+          printf('query=%s, candidate=%s\n', query, candidate)
+          printf('Normalized match_score=%f\n', match_score)
 
-    _prepare_matrix = function(self, name, m, n)
-      local mat = self[name]
-      if not mat or mat.capacity < m * n then
-        mat = Matrix(value_type)(m, n)
-        self[name] = mat
-      else
-        mat:clear()
-        mat:reshape(m, n)
-      end
-    end,
 
-    _prepare_vector = function(self, name, n)
-      local vec = self[name]
-      if not vec or vec.capacity < n then
-        vec = Vector(value_type)(n)
-        self[name] = vec
-      end
-      vec.length = n
-    end,
+          --
+          -- local n = #query
+          -- local mean = 0.0
+          -- local M2 = 0.0
+          --
+          -- for i = 0, n - 1 do
+          --   local x = self._traceback[i] / #candidate
+          --   local delta = x - mean
+          --   mean = mean + delta/(i+1)
+          --   M2 = M2 + delta * (x - mean)
+          -- end
+          --
+          -- local variance
+          -- if n < 2 then
+          --   variance = 0
+          -- else
+          --   variance = M2 / n
+          -- end
+          --
+          -- printf("normalized mean=%f, stddev=%f\n", mean, math.sqrt(variance))
+          printf("\ntraceback:\n")
+          self:_dump_trace(query, candidate)
+          printf("\nscoreboard:\n")
+          self:_dumpMatrix(query, candidate)
+          printf("---\n")
+        end
+
+        return match_score, self._traceback
+      end,
+
+      _dump_trace = function(self, query, candidate)
+        local Z = self._traceback
+        assert(#query <= #Z)
+        printf("%s\n", candidate)
+        local j = 0
+        for i = 0, #candidate - 1 do
+          if j < #query and i == Z[j] then
+            printf("%c", string.byte(candidate, i + 1))
+            j = j + 1
+          else
+            printf("-")
+          end
+        end
+        printf("\n")
+      end,
+
+      _dumpMatrix = function(self, query, candidate)
+        local m = #query + 1
+        local n = #candidate + 1
+        local X = self._scoreboard
+
+        -- Header row
+        printf("     ")
+        for j = 1, n - 1 do
+          printf("'%c'  ", string.byte(candidate, j))
+        end
+        printf("\n")
+
+        for i = 1, m - 1 do
+          printf("'%c'  ", string.byte(query, i))
+          for j = 1, n - 1 do
+            printf(" %.2f", X[i * n + j])
+          end
+          printf("\n")
+        end
+      end,
+    }
   },
+  {
+    __call = function(cls, ...) return setmetatable({}, cls):__init(...) end,
+  }
+)
 
-  __tostring = function(self)
-    return string.format('Matrix:\n\n%s', self._scoreboard)
-  end,
-}
-
-return MatchSession
-
+return Matcher

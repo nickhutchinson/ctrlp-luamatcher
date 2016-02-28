@@ -1,78 +1,100 @@
-local FFIUtil = require "fuzzy_matcher.internal.ffi_util"
 local ffi = require "ffi"
-local DEBUG_BOUNDS_CHECKING = false
+
+local BOUNDS_CHECKING = false
+
+ffi.cdef[[
+void* calloc(size_t num, size_t size);
+void* realloc(void *ptr, size_t size);
+void free(void* ptr);
+]]
 
 local cdecl_string = [[ struct {
   static const int ELEM_SIZE = $;
+  $* data;
+  int size;
   int capacity;
-  int length;
-  $ data[0];
 }]]
 
-local ctype_by_value_typeid = {}
+-- Converts the given ctype to an opaque identifier that can be used as a table
+-- key.
+local function typeid(ctype) return tonumber(ffi.typeof(ctype)) end
 
-local function NOOP() end
+local g_vector_typeid_by_value_typeid = {}
 
-local check_index = NOOP
-if DEBUG_BOUNDS_CHECKING == true then
-  check_index = function (self, idx)
-    assert(0 <= idx and idx < self.capacity)
-  end
-end
-
-local metatable = {
-  __new = function(cls, capacity)
-    local size = ffi.sizeof(cls) + capacity * cls.ELEM_SIZE
-    local obj = FFIUtil.allocate_struct(cls, size)
-    obj.capacity = capacity
-    return obj
+local mt = {
+  __new = function(cls, size)
+    return ffi.new(cls,
+                   ffi.C.calloc(size, cls.ELEM_SIZE),
+                   size,
+                   size)
   end,
 
-  __len = function(self)
-    return self.length
+  __gc = function(self)
+    ffi.C.free(self.data)
   end,
 
-  __index = function(self, idx)
-    check_index(self, idx)
-    return self.data[idx]
-  end,
+  __len = function(self) return self.size end,
 
-  __newindex = function(self, idx, val)
-    check_index(self, idx)
-    self.data[idx] = val
-  end,
+  __index = (function()
+    if BOUNDS_CHECKING then
+      return function(self, n)
+        assert(0 <= n and n < self.size, "Index out of bounds")
+        return self.data[n]
+      end
+    else
+      return function(self, n) return self.data[n] end
+    end
+  end)(),
+
+  __newindex = (function()
+    if BOUNDS_CHECKING then
+      return function(self, n, val)
+        assert(0 <= n and n < self.size, "Index out of bounds")
+        self.data[n] = val
+      end
+    else
+      return function(self, n, val)
+        self.data[n] = val
+      end
+    end
+  end)(),
 
   __tostring = function(self)
     local line = {}
-    for i = 0, self.capacity - 1 do
+    for i = 0, #size - 1 do
       table.insert(line, string.format("%8.3f", self[i]))
     end
     return table.concat(line)
   end,
 }
 
-local Vector = setmetatable({
-  clear = function(self)
-    ffi.fill(self.data, self.ELEM_SIZE * self.capacity)
+local Vector
+Vector = setmetatable({
+  clear = function(vec)
+    ffi.fill(vec.data, vec.ELEM_SIZE * #vec)
   end,
 
-  fill = function(self, val)
-    for i=0, #self-1 do
-      self.data[i] = val
+  reset = function(vec, newSize)
+    if newSize > vec.capacity then
+      vec.data = ffi.C.realloc(vec.data, newSize * vec.ELEM_SIZE)
+      vec.capacity = newSize
     end
+    vec.size = newSize
+    Vector.clear(vec)
   end,
 },
 {
-  __call = function(cls, value_type)
-    local type_id = FFIUtil.ctypeid(value_type)
-    local ctype = ctype_by_value_typeid[type_id]
+  -- Constructor.
+  __call = function(cls, value_type, ...)
+    local value_typeid = typeid(value_type)
+    local ctype = g_vector_typeid_by_value_typeid[value_typeid]
     if ctype == nil then
       ctype = ffi.typeof(cdecl_string, ffi.sizeof(value_type),
         ffi.typeof(value_type))
-      ctype = ffi.metatype(ctype, metatable)
-      ctype_by_value_typeid[type_id] = ctype
+      ctype = ffi.metatype(ctype, mt)
+      g_vector_typeid_by_value_typeid[value_typeid] = ctype
     end
-    return ctype
+    return ctype(...)
   end,
 })
 
